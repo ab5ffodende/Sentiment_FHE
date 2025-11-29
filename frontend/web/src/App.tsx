@@ -5,17 +5,28 @@ import { getContractReadOnly, getContractWithSigner } from "./components/useCont
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
 interface SentimentData {
-  id: string;
+  id: number;
   name: string;
-  moodScore: number;
-  workload: number;
-  description: string;
+  moodScore: string;
+  team: string;
   timestamp: number;
   creator: string;
-  isVerified: boolean;
-  decryptedValue: number;
+  publicValue1: number;
+  publicValue2: number;
+  isVerified?: boolean;
+  decryptedValue?: number;
+  encryptedValueHandle?: string;
+}
+
+interface SentimentStats {
+  averageMood: number;
+  positiveCount: number;
+  neutralCount: number;
+  negativeCount: number;
+  teamTrends: { [key: string]: number };
 }
 
 const App: React.FC = () => {
@@ -30,14 +41,16 @@ const App: React.FC = () => {
     status: "pending", 
     message: "" 
   });
-  const [newSentimentData, setNewSentimentData] = useState({ name: "", moodScore: "", workload: "", description: "" });
+  const [newSentimentData, setNewSentimentData] = useState({ name: "", moodScore: "", team: "" });
   const [selectedSentiment, setSelectedSentiment] = useState<SentimentData | null>(null);
+  const [decryptedData, setDecryptedData] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 5;
+  const [filterTeam, setFilterTeam] = useState("all");
+  const [userHistory, setUserHistory] = useState<string[]>([]);
+  const [showStats, setShowStats] = useState(false);
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
@@ -45,16 +58,18 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
         await initialize();
       } catch (error) {
+        console.error('Failed to initialize FHEVM:', error);
         setTransactionStatus({ 
           visible: true, 
           status: "error", 
-          message: "FHEVM initialization failed" 
+          message: "FHEVM initialization failed." 
         });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       } finally {
@@ -101,13 +116,14 @@ const App: React.FC = () => {
         try {
           const businessData = await contract.getBusinessData(businessId);
           sentimentsList.push({
-            id: businessId,
+            id: parseInt(businessId.replace('sentiment-', '')) || Date.now(),
             name: businessData.name,
-            moodScore: Number(businessData.publicValue1) || 0,
-            workload: Number(businessData.publicValue2) || 0,
-            description: businessData.description,
+            moodScore: businessId,
+            team: businessData.description,
             timestamp: Number(businessData.timestamp),
             creator: businessData.creator,
+            publicValue1: Number(businessData.publicValue1) || 0,
+            publicValue2: Number(businessData.publicValue2) || 0,
             isVerified: businessData.isVerified,
             decryptedValue: Number(businessData.decryptedValue) || 0
           });
@@ -149,14 +165,15 @@ const App: React.FC = () => {
         newSentimentData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        moodValue,
-        parseInt(newSentimentData.workload) || 0,
-        newSentimentData.description
+        0,
+        0,
+        newSentimentData.team
       );
       
       setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
       await tx.wait();
       
+      setUserHistory(prev => [...prev, `Created sentiment: ${newSentimentData.name}`]);
       setTransactionStatus({ visible: true, status: "success", message: "Sentiment recorded successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
@@ -164,10 +181,10 @@ const App: React.FC = () => {
       
       await loadData();
       setShowCreateModal(false);
-      setNewSentimentData({ name: "", moodScore: "", workload: "", description: "" });
+      setNewSentimentData({ name: "", moodScore: "", team: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected by user" 
+        ? "Transaction rejected" 
         : "Submission failed: " + (e.message || "Unknown error");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
@@ -191,7 +208,7 @@ const App: React.FC = () => {
       const businessData = await contractRead.getBusinessData(businessId);
       if (businessData.isVerified) {
         const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Data already verified on-chain" });
+        setTransactionStatus({ visible: true, status: "success", message: "Data already verified" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         return storedValue;
       }
@@ -208,26 +225,27 @@ const App: React.FC = () => {
           contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
       await loadData();
+      setUserHistory(prev => [...prev, `Decrypted sentiment: ${clearValue}`]);
       
-      setTransactionStatus({ visible: true, status: "success", message: "Mood score decrypted successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted successfully!" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
       
       return Number(clearValue);
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified on-chain" });
+        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         await loadData();
         return null;
       }
       
-      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed: " + (e.message || "Unknown error") });
+      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     } finally { 
@@ -235,67 +253,76 @@ const App: React.FC = () => {
     }
   };
 
-  const testAvailability = async () => {
+  const checkAvailability = async () => {
     try {
       const contract = await getContractReadOnly();
       if (!contract) return;
       
       const isAvailable = await contract.isAvailable();
-      if (isAvailable) {
-        setTransactionStatus({ visible: true, status: "success", message: "FHE system is available and ready!" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-      }
+      setTransactionStatus({ visible: true, status: "success", message: "Contract is available!" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const filteredSentiments = sentiments.filter(sentiment =>
-    sentiment.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    sentiment.description.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const calculateStats = (): SentimentStats => {
+    const verifiedSentiments = sentiments.filter(s => s.isVerified);
+    const total = verifiedSentiments.length;
+    
+    if (total === 0) {
+      return { averageMood: 0, positiveCount: 0, neutralCount: 0, negativeCount: 0, teamTrends: {} };
+    }
 
-  const paginatedSentiments = filteredSentiments.slice(
-    (currentPage - 1) * itemsPerPage,
-    currentPage * itemsPerPage
-  );
+    const sum = verifiedSentiments.reduce((acc, s) => acc + (s.decryptedValue || 0), 0);
+    const averageMood = sum / total;
+    
+    const positiveCount = verifiedSentiments.filter(s => (s.decryptedValue || 0) >= 7).length;
+    const neutralCount = verifiedSentiments.filter(s => (s.decryptedValue || 0) >= 4 && (s.decryptedValue || 0) < 7).length;
+    const negativeCount = verifiedSentiments.filter(s => (s.decryptedValue || 0) < 4).length;
 
-  const totalPages = Math.ceil(filteredSentiments.length / itemsPerPage);
+    const teamTrends: { [key: string]: number } = {};
+    verifiedSentiments.forEach(s => {
+      if (s.team && s.team !== "undefined") {
+        if (!teamTrends[s.team]) teamTrends[s.team] = 0;
+        teamTrends[s.team] += s.decryptedValue || 0;
+      }
+    });
 
-  const getMoodEmoji = (score: number) => {
-    if (score >= 8) return "😊";
-    if (score >= 6) return "🙂";
-    if (score >= 4) return "😐";
-    if (score >= 2) return "😔";
-    return "😢";
+    Object.keys(teamTrends).forEach(team => {
+      const teamCount = verifiedSentiments.filter(s => s.team === team).length;
+      teamTrends[team] = teamTrends[team] / teamCount;
+    });
+
+    return { averageMood, positiveCount, neutralCount, negativeCount, teamTrends };
   };
 
-  const getWorkloadEmoji = (workload: number) => {
-    if (workload >= 8) return "🔥";
-    if (workload >= 6) return "💪";
-    if (workload >= 4) return "⚖️";
-    if (workload >= 2) return "🐢";
-    return "😴";
-  };
+  const filteredSentiments = sentiments.filter(sentiment => {
+    const matchesSearch = sentiment.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         sentiment.team.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesTeam = filterTeam === "all" || sentiment.team === filterTeam;
+    return matchesSearch && matchesTeam;
+  });
+
+  const teams = Array.from(new Set(sentiments.map(s => s.team).filter(Boolean)));
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>Confidential Employee Sentiment 🌸</h1>
+            <h1>🔐 Confidential Sentiment</h1>
+            <p>FHE Encrypted Employee Feedback</p>
           </div>
-          <div className="header-actions">
-            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
-          </div>
+          <ConnectButton />
         </header>
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <div className="connection-icon">🌸</div>
-            <h2>Connect Your Wallet to Continue</h2>
-            <p>Please connect your wallet to access the confidential employee sentiment system with FHE protection.</p>
+            <div className="connection-icon">🔒</div>
+            <h2>Connect Your Wallet</h2>
+            <p>Securely share your sentiment with FHE encryption</p>
           </div>
         </div>
       </div>
@@ -306,7 +333,7 @@ const App: React.FC = () => {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE Encryption System...</p>
+        <p>Initializing FHE System...</p>
       </div>
     );
   }
@@ -314,194 +341,234 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading sentiment system...</p>
+      <p>Loading encrypted sentiment system...</p>
     </div>
   );
+
+  const stats = calculateStats();
 
   return (
     <div className="app-container">
       <header className="app-header">
-        <div className="logo">
-          <h1>Confidential Employee Sentiment 🌸</h1>
-          <p>FHE-protected mood tracking with privacy</p>
+        <div className="logo-section">
+          <h1>😊 Confidential Sentiment</h1>
+          <p>FHE Protected Employee Feedback</p>
         </div>
         
         <div className="header-actions">
-          <button onClick={testAvailability} className="test-btn">
-            Test FHE System
+          <button className="neon-btn" onClick={checkAvailability}>
+            Check Availability
           </button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">
-            + New Mood Entry
+          <button className="neon-btn primary" onClick={() => setShowCreateModal(true)}>
+            + Share Sentiment
           </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          <ConnectButton />
         </div>
       </header>
-      
-      <div className="main-content">
-        <div className="stats-panels">
-          <div className="stat-panel">
-            <h3>Total Entries</h3>
-            <div className="stat-value">{sentiments.length}</div>
-          </div>
-          <div className="stat-panel">
-            <h3>Verified Data</h3>
-            <div className="stat-value">{sentiments.filter(s => s.isVerified).length}</div>
-          </div>
-          <div className="stat-panel">
-            <h3>Avg Mood</h3>
-            <div className="stat-value">
-              {sentiments.length > 0 ? (sentiments.reduce((sum, s) => sum + s.moodScore, 0) / sentiments.length).toFixed(1) : '0'}
+
+      <div className="main-layout">
+        <aside className="sidebar">
+          <div className="stats-panel">
+            <h3>Team Morale</h3>
+            <div className="stat-item">
+              <span>Average Mood</span>
+              <div className="stat-value">{stats.averageMood.toFixed(1)}/10</div>
+            </div>
+            <div className="stat-item">
+              <span>Positive</span>
+              <div className="stat-value positive">{stats.positiveCount}</div>
+            </div>
+            <div className="stat-item">
+              <span>Neutral</span>
+              <div className="stat-value neutral">{stats.neutralCount}</div>
+            </div>
+            <div className="stat-item">
+              <span>Negative</span>
+              <div className="stat-value negative">{stats.negativeCount}</div>
             </div>
           </div>
-        </div>
 
-        <div className="search-section">
-          <input
-            type="text"
-            placeholder="Search sentiments..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="search-input"
-          />
-          <button onClick={loadData} disabled={isRefreshing} className="refresh-btn">
-            {isRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
+          <div className="fhe-info-panel">
+            <h4>FHE Encryption Flow</h4>
+            <div className="flow-step">
+              <span>1</span>
+              <p>Encrypt sentiment locally</p>
+            </div>
+            <div className="flow-step">
+              <span>2</span>
+              <p>Store encrypted on-chain</p>
+            </div>
+            <div className="flow-step">
+              <span>3</span>
+              <p>Compute statistics privately</p>
+            </div>
+          </div>
 
-        <div className="sentiments-list">
-          {paginatedSentiments.length === 0 ? (
-            <div className="no-data">
-              <p>No sentiment entries found</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">
-                Create First Entry
+          <div className="user-history">
+            <h4>Your Activity</h4>
+            {userHistory.slice(-5).map((item, index) => (
+              <div key={index} className="history-item">{item}</div>
+            ))}
+          </div>
+        </aside>
+
+        <main className="content-area">
+          <div className="controls-bar">
+            <div className="search-filter">
+              <input
+                type="text"
+                placeholder="Search sentiments..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="search-input"
+              />
+              <select 
+                value={filterTeam} 
+                onChange={(e) => setFilterTeam(e.target.value)}
+                className="filter-select"
+              >
+                <option value="all">All Teams</option>
+                {teams.map(team => (
+                  <option key={team} value={team}>{team}</option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="view-controls">
+              <button 
+                className={`view-btn ${!showStats ? 'active' : ''}`}
+                onClick={() => setShowStats(false)}
+              >
+                List View
+              </button>
+              <button 
+                className={`view-btn ${showStats ? 'active' : ''}`}
+                onClick={() => setShowStats(true)}
+              >
+                Statistics
+              </button>
+              <button onClick={loadData} className="refresh-btn">
+                🔄
               </button>
             </div>
-          ) : (
-            paginatedSentiments.map((sentiment, index) => (
-              <div 
-                key={index}
-                className={`sentiment-item ${selectedSentiment?.id === sentiment.id ? "selected" : ""}`}
-                onClick={() => setSelectedSentiment(sentiment)}
-              >
-                <div className="sentiment-header">
-                  <span className="sentiment-name">{sentiment.name}</span>
-                  <span className={`status-badge ${sentiment.isVerified ? "verified" : "pending"}`}>
-                    {sentiment.isVerified ? "✅ Verified" : "🔓 Pending"}
-                  </span>
-                </div>
-                <div className="sentiment-scores">
-                  <span>Mood: {getMoodEmoji(sentiment.moodScore)} {sentiment.moodScore}/10</span>
-                  <span>Workload: {getWorkloadEmoji(sentiment.workload)} {sentiment.workload}/10</span>
-                </div>
-                <div className="sentiment-meta">
-                  <span>{new Date(sentiment.timestamp * 1000).toLocaleDateString()}</span>
-                  <span>By: {sentiment.creator.substring(0, 6)}...{sentiment.creator.substring(38)}</span>
+          </div>
+
+          {showStats ? (
+            <div className="stats-view">
+              <div className="chart-container">
+                <h3>Mood Distribution</h3>
+                <div className="chart-bars">
+                  <div className="chart-bar positive" style={{ height: `${(stats.positiveCount / sentiments.length) * 100}%` }}>
+                    <span>Positive</span>
+                  </div>
+                  <div className="chart-bar neutral" style={{ height: `${(stats.neutralCount / sentiments.length) * 100}%` }}>
+                    <span>Neutral</span>
+                  </div>
+                  <div className="chart-bar negative" style={{ height: `${(stats.negativeCount / sentiments.length) * 100}%` }}>
+                    <span>Negative</span>
+                  </div>
                 </div>
               </div>
-            ))
+
+              <div className="team-stats">
+                <h3>Team Averages</h3>
+                {Object.entries(stats.teamTrends).map(([team, avg]) => (
+                  <div key={team} className="team-stat">
+                    <span>{team}</span>
+                    <div className="team-score">{avg.toFixed(1)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="sentiments-grid">
+              {filteredSentiments.length === 0 ? (
+                <div className="empty-state">
+                  <p>No sentiments found</p>
+                  <button onClick={() => setShowCreateModal(true)} className="neon-btn">
+                    Share First Sentiment
+                  </button>
+                </div>
+              ) : (
+                filteredSentiments.map((sentiment, index) => (
+                  <div 
+                    key={index} 
+                    className="sentiment-card"
+                    onClick={() => setSelectedSentiment(sentiment)}
+                  >
+                    <div className="card-header">
+                      <h3>{sentiment.name}</h3>
+                      <span className={`status ${sentiment.isVerified ? 'verified' : 'encrypted'}`}>
+                        {sentiment.isVerified ? '✅ Verified' : '🔒 Encrypted'}
+                      </span>
+                    </div>
+                    <div className="card-content">
+                      <p>Team: {sentiment.team}</p>
+                      <p>Date: {new Date(sentiment.timestamp * 1000).toLocaleDateString()}</p>
+                      {sentiment.isVerified && (
+                        <div className="mood-display">
+                          Mood: {sentiment.decryptedValue}/10
+                        </div>
+                      )}
+                    </div>
+                    <div className="card-footer">
+                      <span className="creator">By: {sentiment.creator.substring(0, 8)}...</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           )}
-        </div>
-
-        {totalPages > 1 && (
-          <div className="pagination">
-            <button 
-              disabled={currentPage === 1}
-              onClick={() => setCurrentPage(currentPage - 1)}
-            >
-              Previous
-            </button>
-            <span>Page {currentPage} of {totalPages}</span>
-            <button 
-              disabled={currentPage === totalPages}
-              onClick={() => setCurrentPage(currentPage + 1)}
-            >
-              Next
-            </button>
-          </div>
-        )}
-
-        <div className="faq-section">
-          <h3>FHE Protection FAQ</h3>
-          <div className="faq-item">
-            <strong>How is my mood data protected?</strong>
-            <p>Your mood scores are encrypted using Fully Homomorphic Encryption (FHE) before being stored on-chain.</p>
-          </div>
-          <div className="faq-item">
-            <strong>What does FHE verification do?</strong>
-            <p>Verification allows you to prove the decrypted value matches the encrypted data without revealing it to others.</p>
-          </div>
-        </div>
+        </main>
       </div>
 
       {showCreateModal && (
         <div className="modal-overlay">
-          <div className="create-modal">
+          <div className="modal-content">
             <div className="modal-header">
-              <h2>New Mood Entry</h2>
-              <button onClick={() => setShowCreateModal(false)} className="close-btn">&times;</button>
+              <h2>Share Your Sentiment</h2>
+              <button onClick={() => setShowCreateModal(false)} className="close-btn">×</button>
             </div>
-            
             <div className="modal-body">
-              <div className="fhe-notice">
-                <strong>FHE Protection</strong>
-                <p>Mood score will be encrypted with FHE for privacy protection</p>
-              </div>
-              
               <div className="form-group">
-                <label>Employee Name *</label>
-                <input 
-                  type="text" 
+                <label>Your Name</label>
+                <input
+                  type="text"
                   value={newSentimentData.name}
                   onChange={(e) => setNewSentimentData({...newSentimentData, name: e.target.value})}
-                  placeholder="Enter name..."
+                  placeholder="Enter your name"
                 />
               </div>
-              
               <div className="form-group">
-                <label>Mood Score (1-10) *</label>
-                <input 
-                  type="number" 
-                  min="1" 
-                  max="10" 
+                <label>Mood Score (1-10)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
                   value={newSentimentData.moodScore}
                   onChange={(e) => setNewSentimentData({...newSentimentData, moodScore: e.target.value})}
                   placeholder="1-10"
                 />
-                <div className="data-label">FHE Encrypted</div>
+                <small>FHE Encrypted Integer</small>
               </div>
-              
               <div className="form-group">
-                <label>Workload (1-10) *</label>
-                <input 
-                  type="number" 
-                  min="1" 
-                  max="10" 
-                  value={newSentimentData.workload}
-                  onChange={(e) => setNewSentimentData({...newSentimentData, workload: e.target.value})}
-                  placeholder="1-10"
-                />
-                <div className="data-label">Public Data</div>
-              </div>
-              
-              <div className="form-group">
-                <label>Description</label>
-                <input 
-                  type="text" 
-                  value={newSentimentData.description}
-                  onChange={(e) => setNewSentimentData({...newSentimentData, description: e.target.value})}
-                  placeholder="Optional notes..."
+                <label>Team</label>
+                <input
+                  type="text"
+                  value={newSentimentData.team}
+                  onChange={(e) => setNewSentimentData({...newSentimentData, team: e.target.value})}
+                  placeholder="Your team name"
                 />
               </div>
             </div>
-            
             <div className="modal-footer">
-              <button onClick={() => setShowCreateModal(false)} className="cancel-btn">Cancel</button>
+              <button onClick={() => setShowCreateModal(false)} className="btn secondary">Cancel</button>
               <button 
-                onClick={createSentiment}
-                disabled={creatingSentiment || isEncrypting || !newSentimentData.name || !newSentimentData.moodScore}
-                className="submit-btn"
+                onClick={createSentiment} 
+                disabled={creatingSentiment || isEncrypting}
+                className="btn primary"
               >
-                {creatingSentiment || isEncrypting ? "Encrypting..." : "Create Entry"}
+                {creatingSentiment ? 'Encrypting...' : 'Share Sentiment'}
               </button>
             </div>
           </div>
@@ -510,67 +577,73 @@ const App: React.FC = () => {
 
       {selectedSentiment && (
         <div className="modal-overlay">
-          <div className="detail-modal">
+          <div className="modal-content large">
             <div className="modal-header">
               <h2>Sentiment Details</h2>
-              <button onClick={() => setSelectedSentiment(null)} className="close-btn">&times;</button>
+              <button onClick={() => {
+                setSelectedSentiment(null);
+                setDecryptedData(null);
+              }} className="close-btn">×</button>
             </div>
-            
             <div className="modal-body">
-              <div className="detail-info">
-                <div className="info-row">
-                  <span>Employee:</span>
-                  <strong>{selectedSentiment.name}</strong>
+              <div className="detail-grid">
+                <div className="detail-item">
+                  <label>Employee</label>
+                  <span>{selectedSentiment.name}</span>
                 </div>
-                <div className="info-row">
-                  <span>Workload:</span>
-                  <strong>{getWorkloadEmoji(selectedSentiment.workload)} {selectedSentiment.workload}/10</strong>
+                <div className="detail-item">
+                  <label>Team</label>
+                  <span>{selectedSentiment.team}</span>
                 </div>
-                <div className="info-row">
-                  <span>Mood Status:</span>
-                  <strong>
-                    {selectedSentiment.isVerified ? 
-                      `✅ ${selectedSentiment.decryptedValue}/10 (Verified)` : 
-                      "🔒 FHE Encrypted"
-                    }
-                  </strong>
+                <div className="detail-item">
+                  <label>Date</label>
+                  <span>{new Date(selectedSentiment.timestamp * 1000).toLocaleString()}</span>
                 </div>
-                <div className="info-row">
-                  <span>Date:</span>
-                  <strong>{new Date(selectedSentiment.timestamp * 1000).toLocaleDateString()}</strong>
+                <div className="detail-item">
+                  <label>Status</label>
+                  <span className={selectedSentiment.isVerified ? 'verified' : 'encrypted'}>
+                    {selectedSentiment.isVerified ? 'Decrypted & Verified' : 'FHE Encrypted'}
+                  </span>
                 </div>
-                <div className="info-row">
-                  <span>Description:</span>
-                  <span>{selectedSentiment.description || "No description"}</span>
+                <div className="detail-item full">
+                  <label>Mood Value</label>
+                  <div className="mood-value">
+                    {selectedSentiment.isVerified ? (
+                      <span className="decrypted-value">{selectedSentiment.decryptedValue}/10</span>
+                    ) : decryptedData !== null ? (
+                      <span className="decrypted-value">{decryptedData}/10</span>
+                    ) : (
+                      <span className="encrypted-value">🔒 Encrypted (FHE Protected)</span>
+                    )}
+                  </div>
                 </div>
               </div>
-              
-              <div className="verification-section">
-                <button 
-                  onClick={() => decryptData(selectedSentiment.id)}
-                  disabled={isDecrypting}
-                  className={`verify-btn ${selectedSentiment.isVerified ? "verified" : ""}`}
-                >
-                  {isDecrypting ? "Decrypting..." : 
-                   selectedSentiment.isVerified ? "✅ Verified" : "🔓 Verify Mood Score"}
-                </button>
-                <p className="verification-note">
-                  FHE verification proves the decrypted mood score matches the encrypted data
-                </p>
-              </div>
+
+              {!selectedSentiment.isVerified && (
+                <div className="decryption-section">
+                  <button 
+                    onClick={async () => {
+                      const result = await decryptData(selectedSentiment.moodScore);
+                      if (result !== null) setDecryptedData(result);
+                    }}
+                    disabled={isDecrypting}
+                    className="btn primary"
+                  >
+                    {isDecrypting ? 'Decrypting...' : 'Decrypt Mood'}
+                  </button>
+                  <p className="fhe-note">
+                    FHE decryption happens locally. The proof is then verified on-chain.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
       )}
 
       {transactionStatus.visible && (
-        <div className="transaction-toast">
-          <div className={`toast-content ${transactionStatus.status}`}>
-            {transactionStatus.status === "pending" && <div className="spinner"></div>}
-            {transactionStatus.status === "success" && "✓"}
-            {transactionStatus.status === "error" && "✗"}
-            <span>{transactionStatus.message}</span>
-          </div>
+        <div className={`toast ${transactionStatus.status}`}>
+          {transactionStatus.message}
         </div>
       )}
     </div>
